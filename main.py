@@ -3,6 +3,8 @@ import espnow
 import ubinascii
 import uasyncio as asyncio
 from packet import Packet, PacketType
+from message import Message
+import _thread
 
 
 class AetherMeshNode:
@@ -19,7 +21,7 @@ class AetherMeshNode:
     self.seen_packets = set()
     self.routing_table = {
       self.mac: (self.mac, 0)
-    } # dest: (next_hop, dist)
+    }  # dest: (next_hop, dist)
 
   def send_packet(self, dest_mac, packet):
     if dest_mac == "ffffffffffff":
@@ -88,15 +90,13 @@ class AetherMeshNode:
   def handle_routing_packet(self, packet):
     # Extract routing information from packet
     dest_mac = packet.payload[:6]
-    next_hop = packet.payload[6:12]
-    dist = packet.payload[12]
+    dist = packet.payload[6]
 
     # Decode MAC addresses
     dest_mac_decoded = ubinascii.hexlify(dest_mac).decode()
-    next_hop_decoded = ubinascii.hexlify(next_hop).decode()
 
     # Update routing table with correct information
-    self.update_routing_table(dest_mac_decoded, next_hop_decoded, dist + 1)
+    self.update_routing_table(dest_mac_decoded, packet.src_mac_str, dist + 1)
     self.update_routing_table(packet.src_mac_str, packet.src_mac_str, 1)
 
   def handle_tcp_packet(self, packet):
@@ -111,18 +111,17 @@ class AetherMeshNode:
       if packet:
         self.process_packet(packet)
       await asyncio.sleep_ms(10)
-  
+
   async def broadcast_routing_table(self):
     while True:
       for dest_mac, (next_hop, dist) in self.routing_table.items():
         dest_mac_bytes = bytes.fromhex(dest_mac)
-        next_hop_bytes = bytes.fromhex(next_hop)
         routing_packet = Packet(packet_type=PacketType.ROUTING,
                                 src_mac=bytes.fromhex(self.mac),
                                 dest_mac=bytes.fromhex("ffffffffffff"),
-                                payload=dest_mac_bytes + next_hop_bytes + dist.to_bytes(1, 'big'))
+                                payload=dest_mac_bytes + dist.to_bytes(1, 'big'))
         self.send_packet("ffffffffffff", routing_packet)
-      await asyncio.sleep(60)
+      await asyncio.sleep(10)
 
   def run(self):
     print("Node started")
@@ -130,8 +129,26 @@ class AetherMeshNode:
     loop = asyncio.get_event_loop()
     loop.create_task(self.receive_loop())
     loop.create_task(self.broadcast_routing_table())
+    loop.create_task(cli_loop(self))
     loop.run_forever()
 
+
+async def cli_loop(node):
+  while True:
+    cmd = await unblock(input, "AetherMesh> ")
+    if cmd == "show routing":
+      for dest, (next_hop, dist) in node.routing_table.items():
+        print(f"(cmd: show routing) {dest} via {next_hop} distance {dist}")
+    else:
+      print("Unknown command")
+
+
+async def unblock(func, *args, **kwargs):
+  def wrap(func, message, args, kwargs):
+    message.set(func(*args, **kwargs))
+  msg = Message()
+  _thread.start_new_thread(wrap, (func, msg, args, kwargs))
+  return await msg
 
 node = AetherMeshNode()
 node.run()
