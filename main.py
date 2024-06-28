@@ -1,9 +1,7 @@
 import network
 import espnow
 import ubinascii
-import sys
 import uasyncio as asyncio
-import uselect
 from packet import Packet, PacketType
 
 
@@ -14,19 +12,22 @@ class AetherMeshNode:
     self.mac = ubinascii.hexlify(self.esp.config('mac')).decode()
     self.e = espnow.ESPNow()
     self.e.active(True)
-    self.seen_packets = set()
-    self.routing_table = {}
-
-  def send_packet(self, dest_mac, data, packet_type=PacketType.UDP):
-    packet = Packet(packet_type=packet_type,
-                    src_mac=bytes.fromhex(self.mac),
-                    dest_mac=bytes.fromhex(dest_mac),
-                    payload=data)
     try:
       self.e.get_peer(b'\xff' * 6)
     except OSError:
       self.e.add_peer(b'\xff' * 6)
-    self.e.send(b'\xff' * 6, packet.to_bytes())
+    self.seen_packets = set()
+    self.routing_table = {
+      self.mac: (self.mac, 0)
+    } # dest: (next_hop, dist)
+
+  def send_packet(self, dest_mac, packet):
+    if dest_mac == "ffffffffffff":
+      self.e.send(b'\xff' * 6, packet.to_bytes())
+    else:
+      self.e.add_peer(bytes.fromhex(dest_mac))
+      self.e.send(bytes.fromhex(dest_mac), packet.to_bytes())
+      self.e.del_peer(bytes.fromhex(dest_mac))
 
   def receive_packet(self):
     raw_packet = self.e.recv(0)
@@ -48,17 +49,12 @@ class AetherMeshNode:
     if len(self.seen_packets) > 100:
       self.seen_packets.pop()
 
-    self.handle_packet(packet)
-
-    """ if packet.dest_mac_str == self.mac:
+    if packet.dest_mac_str == self.mac or packet.dest_mac_str == 'ffffffffffff':
       self.handle_packet(packet)
     else:
-      self.forward_packet(packet) """
+      self.forward_packet(packet)
 
   def handle_packet(self, packet):
-    print(f"Received packet type {packet.packet_type} from {packet.src_mac_str}: {packet.payload}")
-    print(f"Packet details: {packet}")
-
     if packet.packet_type == PacketType.ROUTING:
       self.handle_routing_packet(packet)
     elif packet.packet_type == PacketType.TCP:
@@ -78,21 +74,35 @@ class AetherMeshNode:
       self.send_packet(next_hop, packet)
     else:
       # If no route is known, broadcast the packet
-      self.send_packet(b'\xff' * 6, packet)
+      self.send_packet("ffffffffffff", packet)
 
-  def update_routing_table(self, dest_mac, next_hop):
-    self.routing_table[dest_mac] = next_hop
+  def update_routing_table(self, dest_mac, next_hop, dist):
+    # Update routing table with new information
+    if dest_mac not in self.routing_table:
+      self.routing_table[dest_mac] = (next_hop, dist)
+    else:
+      current_next_hop, current_dist = self.routing_table[dest_mac]
+      if dist < current_dist:
+        self.routing_table[dest_mac] = (next_hop, dist)
 
   def handle_routing_packet(self, packet):
-    # Process routing information
-    pass
+    # Extract routing information from packet
+    dest_mac = packet.payload[:6]
+    next_hop = packet.payload[6:12]
+    dist = packet.payload[12]
+
+    # Decode MAC addresses
+    dest_mac_decoded = ubinascii.hexlify(dest_mac).decode()
+    next_hop_decoded = ubinascii.hexlify(next_hop).decode()
+
+    # Update routing table with correct information
+    self.update_routing_table(dest_mac_decoded, next_hop_decoded, dist + 1)
+    self.update_routing_table(packet.src_mac_str, packet.src_mac_str, 1)
 
   def handle_tcp_packet(self, packet):
-    # Process TCP-like packet
     pass
 
   def handle_udp_packet(self, packet):
-    # Process UDP-like packet
     pass
 
   async def receive_loop(self):
@@ -101,24 +111,25 @@ class AetherMeshNode:
       if packet:
         self.process_packet(packet)
       await asyncio.sleep_ms(10)
-
-  async def send_loop(self):
-    poller = uselect.poll()
-    poller.register(sys.stdin, uselect.POLLIN)
+  
+  async def broadcast_routing_table(self):
     while True:
-      events = poller.poll(0)
-      if events:
-        message = sys.stdin.readline().strip()
-        if message:
-          self.send_packet('ffffffffffff', message.encode(), PacketType.UDP)
-      await asyncio.sleep_ms(10)
+      for dest_mac, (next_hop, dist) in self.routing_table.items():
+        dest_mac_bytes = bytes.fromhex(dest_mac)
+        next_hop_bytes = bytes.fromhex(next_hop)
+        routing_packet = Packet(packet_type=PacketType.ROUTING,
+                                src_mac=bytes.fromhex(self.mac),
+                                dest_mac=bytes.fromhex("ffffffffffff"),
+                                payload=dest_mac_bytes + next_hop_bytes + dist.to_bytes(1, 'big'))
+        self.send_packet("ffffffffffff", routing_packet)
+      await asyncio.sleep(60)
 
   def run(self):
     print("Node started")
     print(f"MAC address: {self.mac}")
     loop = asyncio.get_event_loop()
     loop.create_task(self.receive_loop())
-    loop.create_task(self.send_loop())
+    loop.create_task(self.broadcast_routing_table())
     loop.run_forever()
 
 
