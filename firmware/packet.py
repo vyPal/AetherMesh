@@ -107,6 +107,8 @@ class PacketType:
   UDP = 2
   ICMP = 3
   ROUTING = 4
+  TOPOLOGY_REQUEST = 5
+  TOPOLOGY_RESPONSE = 6
 
 # Flag constants
 class Flags:

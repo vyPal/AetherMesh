@@ -49,7 +49,7 @@ class AetherMeshNode:
 
     self.seen_packets.add(packet_hash)
     if len(self.seen_packets) > 100:
-      self.seen_packets.pop()
+      self.seen_packets.pop(-1)
 
     if packet.dest_mac_str == self.mac or packet.dest_mac_str == 'ffffffffffff':
       self.handle_packet(packet)
@@ -62,6 +62,10 @@ class AetherMeshNode:
     elif packet.packet_type == PacketType.TCP:
       self.handle_tcp_packet(packet)
     elif packet.packet_type == PacketType.UDP:
+      self.handle_udp_packet(packet)
+    elif packet.packet_type == PacketType.TOPOLOGY_REQUEST:
+      self.handle_udp_packet(packet)
+    elif packet.packet_type == PacketType.TOPOLOGY_RESPONSE:
       self.handle_udp_packet(packet)
 
   def forward_packet(self, packet):
@@ -103,7 +107,35 @@ class AetherMeshNode:
     pass
 
   def handle_udp_packet(self, packet):
-    pass
+    if packet.packet_type == PacketType.TOPOLOGY_REQUEST:
+      self.send_topology_response(packet.src_mac)
+    elif packet.packet_type == PacketType.TOPOLOGY_RESPONSE:
+      self.process_topology_response(packet)
+  
+  def process_topology_response(self, packet):
+    neighbors = packet.payload.decode().split(',')
+    for neighbor in neighbors:
+      self.update_routing_table(neighbor, packet.src_mac_str, 1)
+    
+    print(f"(cmd: show topology) {packet.src_mac_str} {neighbors}")
+
+  async def request_topology(self):
+    for dest_mac, (next_hop, dist) in self.routing_table.items():
+      if dist == 1:  # Only direct neighbors
+        request_packet = Packet(packet_type=PacketType.TOPOLOGY_REQUEST,
+                                src_mac=bytes.fromhex(self.mac),
+                                dest_mac=bytes.fromhex(dest_mac),
+                                payload=b'')
+        self.send_packet(dest_mac, request_packet)
+
+  def send_topology_response(self, dest_mac):
+    neighbors = [dest for dest, (next_hop, dist) in self.routing_table.items() if dist == 1]
+    payload = ','.join(neighbors).encode()
+    response_packet = Packet(packet_type=PacketType.TOPOLOGY_RESPONSE,
+                             src_mac=bytes.fromhex(self.mac),
+                             dest_mac=dest_mac,
+                             payload=payload)
+    self.send_packet(ubinascii.hexlify(dest_mac).decode(), response_packet)
 
   async def receive_loop(self):
     while True:
@@ -139,6 +171,13 @@ async def cli_loop(node):
     if cmd == "show routing":
       for dest, (next_hop, dist) in node.routing_table.items():
         print(f"(cmd: show routing) {dest} via {next_hop} distance {dist}")
+    elif cmd == "show mac":
+      print(f"(cmd: show mac) {node.mac}")
+    elif cmd == "show neighbors":
+      neighbors = [dest for dest, (next_hop, dist) in node.routing_table.items() if dist == 1]
+      print(f"(cmd: show neighbors) {neighbors}")
+    elif cmd == "show topology":
+      await node.request_topology()
     else:
       print("Unknown command")
 
